@@ -1,0 +1,18 @@
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python/
+venv/
+
+# Database
+*.db
+
+# Scraped data
+generi.txt
+
+# Directories with their own Git repos or old project files
+m3u-radio-music-playlists/
+old_webradio/
