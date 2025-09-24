@@ -3,6 +3,11 @@ import sqlite3
 import os
 import requests
 from bs4 import BeautifulSoup
+import time
+import requests
+from bs4 import BeautifulSoup
+import time
+from urllib.parse import urlparse
 
 country_codes = {
     "ad": "Andorra", "ae": "United Arab Emirates", "af": "Afghanistan", "ag": "Antigua and Barbuda",
@@ -63,31 +68,6 @@ country_codes = {
     "zw": "Zimbabwe", "italian": "Italy"
 }
 
-def check_if_multiple_pages(soup):
-    pages = soup.find_all('a', class_ = "page-link")
-    try:
-        no_pages=pages[-2].attrs['href'].split('=')[-1]
-    except Exception:
-        no_pages=1
-    return no_pages
-
-def retrieve(soup):
-    logos = []
-    stations = []
-    names = []
-    divs = soup.find_all('div', class_ = "float-right")
-    for div in divs:
-        try:
-            logo = div.img.attrs['src']
-            name = div.img.attrs['alt']
-            station = div.a.attrs['onclick'].split("'")[1]
-            logos.append(logo)
-            names.append(name)
-            stations.append(station)
-        except:
-            pass
-    return logos, stations, names
-
 def create_database():
     if os.path.exists('radio.db'):
         os.remove('radio.db')
@@ -131,6 +111,22 @@ def create_database():
         )
     ''')
 
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS sources (
+            id INTEGER PRIMARY KEY,
+            url TEXT UNIQUE,
+            folder TEXT
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS sources (
+            id INTEGER PRIMARY KEY,
+            url TEXT UNIQUE,
+            folder TEXT
+        )
+    ''')
+
     conn.commit()
     return conn
 
@@ -155,41 +151,52 @@ def parse_m3u(file_path):
         print(f"Error parsing {file_path}: {e}")
     return stations
 
+def scrape_sources_from_readme(conn):
+    c = conn.cursor()
+    readme_url = "https://raw.githubusercontent.com/junguler/m3u-radio-music-playlists/main/README.md"
+    try:
+        response = requests.get(readme_url, timeout=10)
+        response.raise_for_status() # Raise an exception for HTTP errors
+        soup = BeautifulSoup(response.content, 'lxml')
+        
+        sources_table = soup.find('h3', string='sources').find_next_sibling('table')
+        if sources_table:
+            for row in sources_table.find_all('tr')[1:]:
+                cols = row.find_all('td')
+                if len(cols) >= 2:
+                    website_url = cols[0].find('a').get('href')
+                    folder_name = cols[1].find('a').get('href').split('/')[-1]
+                    c.execute("INSERT OR IGNORE INTO sources (url, folder) VALUES (?, ?)", (website_url, folder_name))
+                    conn.commit()
+    except requests.exceptions.RequestException as e:
+        print(f"Error scraping README.md for sources: {e}")
+    except Exception as e:
+        print(f"Error parsing README.md: {e}")
+
 def populate_database(conn):
     c = conn.cursor()
 
-    # Scrape genres and stations from online-radio.eu
-    with open("generi.txt","r") as file_in:
-        genres = file_in.readlines()
-        for genre in genres:
-            genre = genre.strip()
-            c.execute("INSERT OR IGNORE INTO genres (name) VALUES (?)", (genre,))
+    # Scrape sources from README.md
+    scrape_sources_from_readme(conn)
+
+    # Process genres from m3u-radio-music-playlists
+    genre_path = "m3u-radio-music-playlists"
+    for filename in os.listdir(genre_path):
+        if filename.endswith(".m3u") and not filename.startswith("---"):
+            genre_name = os.path.splitext(filename)[0]
+            c.execute("INSERT OR IGNORE INTO genres (name) VALUES (?)", (genre_name,))
             conn.commit()
+            genre_id = c.lastrowid
+            stations = parse_m3u(os.path.join(genre_path, filename))
+            for station in stations:
+                c.execute("INSERT OR IGNORE INTO stations (name, url) VALUES (?, ?)", (station["name"], station["url"]))
+                conn.commit()
+                c.execute("SELECT id FROM stations WHERE url = ?", (station["url"],))
+                station_id = c.fetchone()[0]
+                c.execute("INSERT OR IGNORE INTO station_genres (station_id, genre_id) VALUES (?, ?)", (station_id, genre_id))
+                conn.commit()
 
-            url = "http://online-radio.eu/genre/" + genre
-            resp = requests.get(url)
-            soup = BeautifulSoup(resp.content, 'lxml')
-            no_pages = check_if_multiple_pages(soup)
-            for i in range(1, int(no_pages)+1):
-                page_url = url + "?page=" + str(i)
-                print(f"Scraping {page_url}")
-                response = requests.get(page_url)
-                soup = BeautifulSoup(response.content, 'lxml')
-                logos, stations, names = retrieve(soup)
-                for j in range(len(logos)):
-                    logo_url = "http://online-radio.eu" + logos[j]
-                    station_url = stations[j]
-                    station_name = names[j]
-                    c.execute("INSERT OR IGNORE INTO stations (name, url, logo_url) VALUES (?, ?, ?)", (station_name, station_url, logo_url))
-                    conn.commit()
-                    c.execute("SELECT id FROM stations WHERE url = ?", (station_url,))
-                    station_id = c.fetchone()[0]
-                    c.execute("SELECT id FROM genres WHERE name = ?", (genre,))
-                    genre_id = c.fetchone()[0]
-                    c.execute("INSERT OR IGNORE INTO station_genres (station_id, genre_id) VALUES (?, ?)", (station_id, genre_id))
-                    conn.commit()
-
-    # Process countries from m3u-radio-music-playlists
+    # Process countries from m3u-radio-music-playlists/world-radio_map
     country_path = "m3u-radio-music-playlists/world-radio_map"
     for filename in os.listdir(country_path):
         if filename.endswith(".m3u") and not filename.startswith("---"):
@@ -226,8 +233,76 @@ def populate_database(conn):
             c.execute("INSERT OR IGNORE INTO stations (name, url, country_id) VALUES (?, ?, ?)", (station["name"], station["url"], country_id))
         conn.commit()
 
+    # Now try to find logos for stations that don't have them
+    c.execute("SELECT id, url FROM stations WHERE logo_url IS NULL")
+    stations_without_logo = c.fetchall()
+    for station_id, station_url in stations_without_logo:
+        # Try to find the source website for this station
+        # This is a very naive approach and will need to be improved
+        try:
+            parsed_url = urlparse(station_url)
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            c.execute("SELECT url FROM sources WHERE ? LIKE '%' || folder || '%'", (base_url,))
+            source_website = c.fetchone()
+            if source_website:
+                source_url = source_website[0]
+            else:
+                source_url = base_url # Fallback to base URL if no specific source found
+
+            logo_url = find_logo_on_website(source_url)
+            if logo_url:
+                c.execute("UPDATE stations SET logo_url = ? WHERE id = ?", (logo_url, station_id))
+                conn.commit()
+        except Exception as e:
+            print(f"Error processing station {station_url} for logo: {e}")
+            continue
+
+def find_logo_on_website(website_url):
+    try:
+        response = requests.get(website_url, timeout=10)
+        soup = BeautifulSoup(response.content, 'lxml')
+        # Try to find logo in meta tags (e.g., Open Graph)
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            return og_image["content"]
+        # Try to find logo in link tags (e.g., favicon, apple-touch-icon)
+        icon_link = soup.find("link", rel=["icon", "apple-touch-icon"])
+        if icon_link and icon_link.get("href"):
+            return icon_link["href"]
+        # Try to find logo in img tags with common alt/src attributes
+        for img in soup.find_all("img"):
+            if "logo" in img.get("alt", "").lower() or "logo" in img.get("src", "").lower():
+                return img["src"]
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching website {website_url}: {e}")
+    except Exception as e:
+        print(f"Error parsing website {website_url}: {e}")
+    return None
+
+def find_logo_on_website(website_url):
+    try:
+        response = requests.get(website_url, timeout=10)
+        soup = BeautifulSoup(response.content, 'lxml')
+        # Try to find logo in meta tags (e.g., Open Graph)
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            return og_image["content"]
+        # Try to find logo in link tags (e.g., favicon, apple-touch-icon)
+        icon_link = soup.find("link", rel=["icon", "apple-touch-icon"])
+        if icon_link and icon_link.get("href"):
+            return icon_link["href"]
+        # Try to find logo in img tags with common alt/src attributes
+        for img in soup.find_all("img"):
+            if "logo" in img.get("alt", "").lower() or "logo" in img.get("src", "").lower():
+                return img["src"]
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching website {website_url}: {e}")
+    except Exception as e:
+        print(f"Error parsing website {website_url}: {e}")
+    return None
 if __name__ == '__main__':
     db_conn = create_database()
+    scrape_sources_from_readme(db_conn)
     populate_database(db_conn)
     db_conn.close()
     print("Database created and populated successfully.")

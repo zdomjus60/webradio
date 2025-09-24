@@ -1,0 +1,5 @@
+vlc
+requests
+beautifulsoup4
+lxml
+Pillow

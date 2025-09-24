@@ -2,6 +2,8 @@ import tkinter as tk
 from tkinter import ttk
 import vlc
 import sqlite3
+import requests
+import threading
 import io
 from PIL import Image, ImageTk
 
@@ -66,7 +68,7 @@ def get_stations(conn, country=None, genre=None):
     if filters:
         query += " WHERE " + " AND ".join(filters)
     
-    c.execute(query, tuple(params))
+    c.execute(query + " ORDER BY s.name", tuple(params))
     return c.fetchall()
 
 # --- UI Functions ---
@@ -105,84 +107,67 @@ def update_station_list(station_tree, conn, country=None, genre=None):
     for station in stations:
         station_tree.insert("", "end", values=station)
 
-def on_station_select(event, station_tree, play_button, stop_button, info_label, root):
+def on_station_select(event, station_tree, play_button, stop_button, info_label, song_label, logo_label, root):
     selected_item = station_tree.focus()
     if not selected_item:
         return
 
     item = station_tree.item(selected_item)
-    name = item['values'][0]
-    url = item['values'][1]
+    values = item['values']
+    name = values[0]
+    url = values[1]
+    logo_url = values[3] if len(values) > 3 else None
 
-    info_label.config(text=f"Nome: {name}")
+    info_label.config(text=f"Station: {name}")
+    song_label.config(text="") # Reset song title
     play_button.config(state=tk.NORMAL if url else tk.DISABLED)
     stop_button.config(state=tk.DISABLED)
+
+    load_logo(logo_url, logo_label, root)
 
     station_tree.set(selected_item, "Status", "Checking...")
     threading.Thread(target=check_station_status, args=(url, selected_item, root, station_tree), daemon=True).start()
 
 # --- Player Functions ---
-def play_radio(station_tree, player, info_label, stop_button, root, artwork_label):
+def play_radio(station_tree, player, info_label, song_label, stop_button, root):
     selected_item = station_tree.focus()
     if not selected_item:
         return
 
     status = station_tree.set(selected_item, "Status")
     if status != "Online":
-        info_label.config(text="La stazione è offline.")
+        info_label.config(text="Station is offline.")
         return
 
     item = station_tree.item(selected_item)
     name = item['values'][0]
     url = item['values'][1]
-    logo_url = item['values'][3] # Get logo_url from the database
 
     if url:
         media = player.get_instance().media_new(url)
         player.set_media(media)
         player.play()
-        info_label.config(text=f"In riproduzione: {name}")
+        info_label.config(text=f"Now playing: {name}")
+        song_label.config(text="...") # Placeholder for song
         stop_button.config(state=tk.NORMAL)
 
-        # Update window title with NowPlaying metadata (still from VLC)
-        def meta_changed(event, player, info_label):
+        # Update window title and song_label with NowPlaying metadata
+        def meta_changed(event, player, song_label, root):
             meta = player.get_media().get_meta(vlc.Meta.NowPlaying)
             if meta:
                 root.title(f"Radio Player - {meta}")
-                info_label.config(text=f"In riproduzione: {meta}")
+                song_label.config(text=f"Song: {meta}")
+        
         events = player.event_manager()
-        events.event_attach(vlc.EventType.MediaMetaChanged, lambda event: meta_changed(event, player, info_label))
+        # Clear previous events to avoid duplicates
+        events.event_detach(vlc.EventType.MediaMetaChanged)
+        events.event_attach(vlc.EventType.MediaMetaChanged, lambda event: meta_changed(event, player, song_label, root))
 
-        events = player.event_manager()
-        events.event_attach(vlc.EventType.MediaMetaChanged, lambda event: meta_changed(event, player))
-
-        # Download and display logo from database
-        if logo_url:
-            threading.Thread(target=download_artwork, args=(logo_url, root, artwork_label), daemon=True).start()
-
-def download_artwork(url, root, artwork_label):
-    try:
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            image_data = response.content
-            image = Image.open(io.BytesIO(image_data))
-            image = image.resize((100, 100), Image.Resampling.LANCZOS)
-            photo = ImageTk.PhotoImage(image)
-            root.after(0, update_artwork_in_ui, photo, artwork_label)
-    except Exception as e:
-        pass # Ignore artwork download errors
-
-def update_artwork_in_ui(photo, artwork_label):
-    artwork_label.config(image=photo)
-    artwork_label.image = photo # Keep a reference
-
-def stop_radio(player, info_label, stop_button):
+def stop_radio(player, info_label, song_label, stop_button):
     player.stop()
-    info_label.config(text="Riproduzione fermata.")
+    info_label.config(text="Playback stopped.")
+    song_label.config(text="")
     stop_button.config(state=tk.DISABLED)
-
-import requests
-import threading
 
 def check_station_status(url, item_id, root, station_tree):
     try:
@@ -201,6 +186,43 @@ def check_station_status(url, item_id, root, station_tree):
 
 def update_status_in_ui(item_id, status, station_tree):
     station_tree.set(item_id, "Status", status)
+
+def load_logo(url, logo_label, root):
+    """Load a logo from a URL in a background thread and display it."""
+    # Set a placeholder or clear the current image
+    placeholder = ImageTk.PhotoImage(Image.new("RGB", (100, 100), "grey"))
+    logo_label.config(image=placeholder)
+    logo_label.image = placeholder # Keep a reference
+
+    if not url or not url.startswith('http'):
+        return # No valid URL to load
+
+    def _load_image():
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                image_data = response.content
+                image = Image.open(io.BytesIO(image_data))
+                
+                # Resize the image to a fixed width, maintaining aspect ratio
+                width = 100
+                aspect_ratio = image.height / image.width
+                height = int(width * aspect_ratio)
+                image = image.resize((width, height), Image.Resampling.LANCZOS)
+                
+                photo = ImageTk.PhotoImage(image)
+                
+                # Schedule UI update on the main thread
+                root.after(0, lambda: update_logo_in_ui(photo, logo_label))
+        except Exception as e:
+            print(f"Failed to load logo from {url}: {e}")
+
+    threading.Thread(target=_load_image, daemon=True).start()
+
+def update_logo_in_ui(photo, logo_label):
+    """Updates the logo label with the new photo."""
+    logo_label.config(image=photo)
+    logo_label.image = photo # Keep a reference!
 
 # --- Main Application Setup ---
 def main():
@@ -237,13 +259,13 @@ def main():
     clear_button = ttk.Button(button_frame, text="Clear Filters")
     clear_button.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-    country_frame = ttk.LabelFrame(filter_frame, text="Paesi")
+    country_frame = ttk.LabelFrame(filter_frame, text="Countries")
     country_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
     country_listbox = tk.Listbox(country_frame, exportselection=False)
     country_listbox.pack(fill=tk.BOTH, expand=True)
     populate_countries(country_listbox, countries)
 
-    genre_frame = ttk.LabelFrame(filter_frame, text="Generi")
+    genre_frame = ttk.LabelFrame(filter_frame, text="Genres")
     genre_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
     genre_listbox = tk.Listbox(genre_frame, exportselection=False)
     genre_listbox.pack(fill=tk.BOTH, expand=True)
@@ -253,10 +275,12 @@ def main():
     main_frame = ttk.Frame(paned_window)
     paned_window.add(main_frame, weight=3)
 
-    station_tree = ttk.Treeview(main_frame, columns=("Nome", "URL", "Status"), show="headings")
-    station_tree.heading("Nome", text="Nome Radio")
+    station_tree = ttk.Treeview(main_frame, columns=("Nome", "URL", "Status", "LogoURL"), show="headings")
+    station_tree.heading("Nome", text="Radio Name")
     station_tree.heading("URL", text="URL")
     station_tree.heading("Status", text="Status")
+    station_tree.heading("LogoURL", text="Logo") # Define heading even if not shown
+    station_tree["displaycolumns"] = ("Nome", "URL", "Status")
     station_tree.column("Nome", width=250, anchor=tk.W)
     station_tree.column("URL", width=350, anchor=tk.W)
     station_tree.column("Status", width=100, anchor=tk.W)
@@ -270,15 +294,22 @@ def main():
     detail_frame = ttk.Frame(root, height=120, padding="10")
     detail_frame.pack(fill=tk.X)
 
-    artwork_frame = tk.Frame(detail_frame, width=100, height=100, bg="black")
-    artwork_frame.pack(side=tk.LEFT, padx=10)
-    artwork_frame.pack_propagate(False) # Prevent the frame from resizing to fit its content
+    logo_label = ttk.Label(detail_frame)
+    logo_label.pack(side=tk.LEFT, padx=10, anchor=tk.N)
+    # Set initial placeholder
+    placeholder = ImageTk.PhotoImage(Image.new("RGB", (100, 100), "grey"))
+    logo_label.config(image=placeholder)
+    logo_label.image = placeholder
 
-    artwork_label = tk.Label(artwork_frame, bg="black")
-    artwork_label.pack(fill=tk.BOTH, expand=True)
+    # Frame for textual info (station name and song title)
+    text_info_frame = ttk.Frame(detail_frame)
+    text_info_frame.pack(side=tk.LEFT, anchor=tk.N, padx=10)
 
-    info_label = ttk.Label(detail_frame, text="Seleziona una radio per iniziare.", wraplength=400, justify=tk.LEFT, font=("Helvetica", 10))
-    info_label.pack(side=tk.LEFT, padx=10)
+    info_label = ttk.Label(text_info_frame, text="Select a radio to start.", wraplength=400, justify=tk.LEFT, font=("Helvetica", 10, "bold"))
+    info_label.pack(anchor=tk.W)
+
+    song_label = ttk.Label(text_info_frame, text="", wraplength=400, justify=tk.LEFT, font=("Helvetica", 9))
+    song_label.pack(anchor=tk.W)
 
     play_button = ttk.Button(detail_frame, text="Play", state=tk.DISABLED)
     play_button.pack(side=tk.LEFT, padx=5)
@@ -290,10 +321,10 @@ def main():
     apply_button.config(command=lambda: apply_filters(country_listbox, genre_listbox, station_tree, conn))
     clear_button.config(command=lambda: clear_filters(country_listbox, genre_listbox, station_tree, conn))
 
-    station_tree.bind("<<TreeviewSelect>>", lambda event: on_station_select(event, station_tree, play_button, stop_button, info_label, root))
+    station_tree.bind("<<TreeviewSelect>>", lambda event: on_station_select(event, station_tree, play_button, stop_button, info_label, song_label, logo_label, root))
 
-    play_button.config(command=lambda: play_radio(station_tree, player, info_label, stop_button, root, artwork_label))
-    stop_button.config(command=lambda: stop_radio(player, info_label, stop_button))
+    play_button.config(command=lambda: play_radio(station_tree, player, info_label, song_label, stop_button, root))
+    stop_button.config(command=lambda: stop_radio(player, info_label, song_label, stop_button))
 
     # --- Initial State --- #
     update_station_list(station_tree, conn)

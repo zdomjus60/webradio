@@ -1,18 +1,20 @@
-
 # Python
+venv/
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-.Python/
-venv/
 
 # Database
-*.db
+radio.db
 
-# Scraped data
-generi.txt
-
-# Directories with their own Git repos or old project files
+# Sub-repositories and old projects
 m3u-radio-music-playlists/
 old_webradio/
+
+# Temporary and backup files
+*_old.py
+*.zip
+logo_urls.txt
+*.log
+
+# Other
+Cook Islands/
