@@ -4,9 +4,6 @@ import os
 import requests
 from bs4 import BeautifulSoup
 import time
-import requests
-from bs4 import BeautifulSoup
-import time
 from urllib.parse import urlparse
 
 country_codes = {
@@ -119,14 +116,6 @@ def create_database():
         )
     ''')
 
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS sources (
-            id INTEGER PRIMARY KEY,
-            url TEXT UNIQUE,
-            folder TEXT
-        )
-    ''')
-
     conn.commit()
     return conn
 
@@ -186,15 +175,20 @@ def populate_database(conn):
             genre_name = os.path.splitext(filename)[0]
             c.execute("INSERT OR IGNORE INTO genres (name) VALUES (?)", (genre_name,))
             conn.commit()
-            genre_id = c.lastrowid
-            stations = parse_m3u(os.path.join(genre_path, filename))
-            for station in stations:
-                c.execute("INSERT OR IGNORE INTO stations (name, url) VALUES (?, ?)", (station["name"], station["url"]))
-                conn.commit()
-                c.execute("SELECT id FROM stations WHERE url = ?", (station["url"],))
-                station_id = c.fetchone()[0]
-                c.execute("INSERT OR IGNORE INTO station_genres (station_id, genre_id) VALUES (?, ?)", (station_id, genre_id))
-                conn.commit()
+            c.execute("SELECT id FROM genres WHERE name = ?", (genre_name,))
+            genre_id_result = c.fetchone()
+            if genre_id_result:
+                genre_id = genre_id_result[0]
+                stations = parse_m3u(os.path.join(genre_path, filename))
+                for station in stations:
+                    c.execute("INSERT OR IGNORE INTO stations (name, url) VALUES (?, ?)", (station["name"], station["url"]))
+                    conn.commit()
+                    c.execute("SELECT id FROM stations WHERE url = ?", (station["url"],))
+                    station_id_result = c.fetchone()
+                    if station_id_result:
+                        station_id = station_id_result[0]
+                        c.execute("INSERT OR IGNORE INTO station_genres (station_id, genre_id) VALUES (?, ?)", (station_id, genre_id))
+                        conn.commit()
 
     # Process countries from m3u-radio-music-playlists/world-radio_map
     country_path = "m3u-radio-music-playlists/world-radio_map"
@@ -206,78 +200,61 @@ def populate_database(conn):
                 c.execute("INSERT OR IGNORE INTO countries (name) VALUES (?)", (country_name,))
                 conn.commit()
                 c.execute("SELECT id FROM countries WHERE name = ?", (country_name,))
-                country_id = c.fetchone()[0]
-                stations = parse_m3u(os.path.join(country_path, filename))
-                for station in stations:
-                    c.execute("SELECT id FROM stations WHERE url = ?", (station["url"],))
-                    existing_station = c.fetchone()
-                    if existing_station:
-                        c.execute("UPDATE stations SET country_id = ? WHERE id = ?", (country_id, existing_station[0]))
-                    else:
-                        c.execute("INSERT OR IGNORE INTO stations (name, url, country_id) VALUES (?, ?, ?)", (station["name"], station["url"], country_id))
-                    conn.commit()
+                country_id_result = c.fetchone()
+                if country_id_result:
+                    country_id = country_id_result[0]
+                    stations = parse_m3u(os.path.join(country_path, filename))
+                    for station in stations:
+                        c.execute("SELECT id FROM stations WHERE url = ?", (station["url"],))
+                        existing_station = c.fetchone()
+                        if existing_station:
+                            c.execute("UPDATE stations SET country_id = ? WHERE id = ?", (country_id, existing_station[0]))
+                        else:
+                            c.execute("INSERT OR IGNORE INTO stations (name, url, country_id) VALUES (?, ?, ?)", (station["name"], station["url"], country_id))
+                        conn.commit()
 
     # Special handling for italian.m3u
     country_name = "Italy"
     c.execute("INSERT OR IGNORE INTO countries (name) VALUES (?)", (country_name,))
     conn.commit()
     c.execute("SELECT id FROM countries WHERE name = ?", (country_name,))
-    country_id = c.fetchone()[0]
-    stations = parse_m3u(os.path.join("m3u-radio-music-playlists", "italian.m3u"))
-    for station in stations:
-        c.execute("SELECT id FROM stations WHERE url = ?", (station["url"],))
-        existing_station = c.fetchone()
-        if existing_station:
-            c.execute("UPDATE stations SET country_id = ? WHERE id = ?", (country_id, existing_station[0]))
-        else:
-            c.execute("INSERT OR IGNORE INTO stations (name, url, country_id) VALUES (?, ?, ?)", (station["name"], station["url"], country_id))
-        conn.commit()
+    country_id_result = c.fetchone()
+    if country_id_result:
+        country_id = country_id_result[0]
+        stations = parse_m3u(os.path.join("m3u-radio-music-playlists", "italian.m3u"))
+        for station in stations:
+            c.execute("SELECT id FROM stations WHERE url = ?", (station["url"],))
+            existing_station = c.fetchone()
+            if existing_station:
+                c.execute("UPDATE stations SET country_id = ? WHERE id = ?", (country_id, existing_station[0]))
+            else:
+                c.execute("INSERT OR IGNORE INTO stations (name, url, country_id) VALUES (?, ?, ?)", (station["name"], station["url"], country_id))
+            conn.commit()
 
     # Now try to find logos for stations that don't have them
-    c.execute("SELECT id, url FROM stations WHERE logo_url IS NULL")
-    stations_without_logo = c.fetchall()
-    for station_id, station_url in stations_without_logo:
-        # Try to find the source website for this station
-        # This is a very naive approach and will need to be improved
-        try:
-            parsed_url = urlparse(station_url)
-            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-            c.execute("SELECT url FROM sources WHERE ? LIKE '%' || folder || '%'", (base_url,))
-            source_website = c.fetchone()
-            if source_website:
-                source_url = source_website[0]
-            else:
-                source_url = base_url # Fallback to base URL if no specific source found
+    # This part is commented out because it is very slow and may cause the script to hang.
+    # c.execute("SELECT id, url FROM stations WHERE logo_url IS NULL")
+    # stations_without_logo = c.fetchall()
+    # for station_id, station_url in stations_without_logo:
+    #     # Try to find the source website for this station
+    #     # This is a very naive approach and will need to be improved
+    #     try:
+    #         parsed_url = urlparse(station_url)
+    #         base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    #         c.execute("SELECT url FROM sources WHERE ? LIKE '%' || folder || '%'", (base_url,))
+    #         source_website = c.fetchone()
+    #         if source_website:
+    #             source_url = source_website[0]
+    #         else:
+    #             source_url = base_url # Fallback to base URL if no specific source found
 
-            logo_url = find_logo_on_website(source_url)
-            if logo_url:
-                c.execute("UPDATE stations SET logo_url = ? WHERE id = ?", (logo_url, station_id))
-                conn.commit()
-        except Exception as e:
-            print(f"Error processing station {station_url} for logo: {e}")
-            continue
-
-def find_logo_on_website(website_url):
-    try:
-        response = requests.get(website_url, timeout=10)
-        soup = BeautifulSoup(response.content, 'lxml')
-        # Try to find logo in meta tags (e.g., Open Graph)
-        og_image = soup.find("meta", property="og:image")
-        if og_image and og_image.get("content"):
-            return og_image["content"]
-        # Try to find logo in link tags (e.g., favicon, apple-touch-icon)
-        icon_link = soup.find("link", rel=["icon", "apple-touch-icon"])
-        if icon_link and icon_link.get("href"):
-            return icon_link["href"]
-        # Try to find logo in img tags with common alt/src attributes
-        for img in soup.find_all("img"):
-            if "logo" in img.get("alt", "").lower() or "logo" in img.get("src", "").lower():
-                return img["src"]
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching website {website_url}: {e}")
-    except Exception as e:
-        print(f"Error parsing website {website_url}: {e}")
-    return None
+    #         logo_url = find_logo_on_website(source_url)
+    #         if logo_url:
+    #             c.execute("UPDATE stations SET logo_url = ? WHERE id = ?", (logo_url, station_id))
+    #             conn.commit()
+    #     except Exception as e:
+    #         print(f"Error processing station {station_url} for logo: {e}")
+    #         continue
 
 def find_logo_on_website(website_url):
     try:
@@ -300,9 +277,9 @@ def find_logo_on_website(website_url):
     except Exception as e:
         print(f"Error parsing website {website_url}: {e}")
     return None
+
 if __name__ == '__main__':
     db_conn = create_database()
-    scrape_sources_from_readme(db_conn)
     populate_database(db_conn)
     db_conn.close()
     print("Database created and populated successfully.")

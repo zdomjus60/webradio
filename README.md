@@ -16,25 +16,35 @@ This project allows you to browse, filter, and play thousands of internet radio 
 ## Prerequisites
 
 *   Python 3.7+
-*   VLC Media Player must be installed on your system, as this application relies on `libvlc`.
+*   A global installation of **VLC Media Player**. The `python-vlc` library relies on it, so VLC must be installed on your system.
+*   Git command-line tools.
 
 ## Setup Instructions
 
-1.  **Clone the repository:**
+1.  **Clone this repository:**
     ```bash
-    git clone <repository-url>
-    cd <repository-directory>
+    git clone https://github.com/your-username/webradio.git
+    cd webradio
+    ```
+    *(Replace the URL with the actual URL of this repository)*
+
+2.  **Clone the radio playlists repository:**
+    This project's scripts depend on the M3U playlists from the `junguler/m3u-radio-music-playlists` repository. You must clone it **inside** the main `webradio` directory.
+    ```bash
+    git clone https://github.com/junguler/m3u-radio-music-playlists.git
     ```
 
-2.  **Create and activate a virtual environment:**
+3.  **Create and activate a virtual environment:**
     ```bash
     python3 -m venv venv
     source venv/bin/activate
     ```
     *(On Windows, use `venv\Scripts\activate`)*
 
-3.  **Install the required libraries:**
+4.  **Install Python libraries:**
+    First, install the VLC binding, then install the other dependencies from `requirements.txt`.
     ```bash
+    pip install python-vlc
     pip install -r requirements.txt
     ```
 
