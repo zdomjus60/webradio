@@ -1,10 +1,6 @@
-
 import sqlite3
 import os
-import requests
-from bs4 import BeautifulSoup
-import time
-from urllib.parse import urlparse
+import glob
 
 country_codes = {
     "ad": "Andorra", "ae": "United Arab Emirates", "af": "Afghanistan", "ag": "Antigua and Barbuda",
@@ -18,7 +14,7 @@ country_codes = {
     "ca": "Canada", "cc": "Cocos (Keeling) Islands", "cd": "Congo, The Democratic Republic of the",
     "cf": "Central African Republic", "cg": "Congo", "ch": "Switzerland", "ci": "Côte d'Ivoire",
     "ck": "Cook Islands", "cl": "Chile", "cm": "Cameroon", "cn": "China", "co": "Colombia",
-    "cr": "Costa Rica", "cu": "Cuba", "cv": "Cabo Verde", "cw": "Curaçao", "cx": "Christmas Island",
+    "cr": "Costa Rica", "cu": "Cuba", "cw": "Curaçao", "cx": "Christmas Island",
     "cy": "Cyprus", "cz": "Czechia", "de": "Germany", "dj": "Djibouti", "dk": "Denmark",
     "dm": "Dominica", "do": "Dominican Republic", "dz": "Algeria", "ec": "Ecuador", "ee": "Estonia",
     "eg": "Egypt", "eh": "Western Sahara", "er": "Eritrea", "es": "Spain", "et": "Ethiopia",
@@ -62,12 +58,32 @@ country_codes = {
     "vc": "Saint Vincent and the Grenadines", "ve": "Venezuela", "vg": "Virgin Islands, British",
     "vi": "Virgin Islands, U.S.", "vn": "Viet Nam", "vu": "Vanuatu", "wf": "Wallis and Futuna",
     "ws": "Samoa", "ye": "Yemen", "yt": "Mayotte", "za": "South Africa", "zm": "Zambia",
-    "zw": "Zimbabwe", "italian": "Italy"
+    "zw": "Zimbabwe"
+}
+
+# New explicit genre list
+VALID_GENRES = {
+    '60s', '70s', '80s', '90s', 'acid_jazz', 'african', 'alternative',
+    'ambient', 'americana', 'anime', 'arabic', 'asian', 'big_band',
+    'bluegrass', 'blues', 'breakbeat', 'chillout', 'christian',
+    'classical', 'club', 'college', 'comedy', 'country', 'dance',
+    'deutsch', 'disco', 'discofox', 'downtempo', 'drum_and_bass',
+    'easy_listening', 'ebm', 'electronic', 'eurodance', 'film', 'folk',
+    'funk', 'goa', 'gospel', 'gothic', 'greek', 'hardcore', 'hardrock',
+    'hip_hop', 'house', 'india', 'indie', 'industrial', 'instrumental',
+    'jazz', 'jpop', 'jungle', 'latin', 'lounge', 'metal', 'mixed',
+    'musical', 'oldies', 'opera', 'polish', 'polka', 'pop', 'progressive',
+    'punk', 'quran', 'rap', 'reggae', 'retro', 'rnb', 'rock', 'romanian',
+    'russian', 'salsa', 'schlager', 'ska', 'smooth_jazz', 'soul',
+    'soundtrack', 'spiritual', 'sport', 'swing', 'symphonic', 'talk',
+    'techno', 'top_40', 'trance', 'turk', 'urban', 'various', 'wave', 'world',
+    'france', 'spain', 'italy', 'usa', 'portugal', 'uk' # Added country names that appear as top-level m3u files
 }
 
 def create_database():
     if os.path.exists('radio.db'):
         os.remove('radio.db')
+        print("Removed old database.")
     conn = sqlite3.connect('radio.db')
     c = conn.cursor()
 
@@ -108,15 +124,8 @@ def create_database():
         )
     ''')
 
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS sources (
-            id INTEGER PRIMARY KEY,
-            url TEXT UNIQUE,
-            folder TEXT
-        )
-    ''')
-
     conn.commit()
+    print("Database tables created.")
     return conn
 
 def parse_m3u(file_path):
@@ -140,143 +149,87 @@ def parse_m3u(file_path):
         print(f"Error parsing {file_path}: {e}")
     return stations
 
-def scrape_sources_from_readme(conn):
-    c = conn.cursor()
-    readme_url = "https://raw.githubusercontent.com/junguler/m3u-radio-music-playlists/main/README.md"
-    try:
-        response = requests.get(readme_url, timeout=10)
-        response.raise_for_status() # Raise an exception for HTTP errors
-        soup = BeautifulSoup(response.content, 'lxml')
-        
-        sources_table = soup.find('h3', string='sources').find_next_sibling('table')
-        if sources_table:
-            for row in sources_table.find_all('tr')[1:]:
-                cols = row.find_all('td')
-                if len(cols) >= 2:
-                    website_url = cols[0].find('a').get('href')
-                    folder_name = cols[1].find('a').get('href').split('/')[-1]
-                    c.execute("INSERT OR IGNORE INTO sources (url, folder) VALUES (?, ?)", (website_url, folder_name))
-                    conn.commit()
-    except requests.exceptions.RequestException as e:
-        print(f"Error scraping README.md for sources: {e}")
-    except Exception as e:
-        print(f"Error parsing README.md: {e}")
-
 def populate_database(conn):
     c = conn.cursor()
+    
+    country_names_to_codes = {v.lower(): k for k, v in country_codes.items()}
 
-    # Scrape sources from README.md
-    scrape_sources_from_readme(conn)
+    print("Scanning all .m3u files recursively...")
+    all_m3u_files = glob.glob('m3u-radio-music-playlists/**/*.m3u', recursive=True)
+    
+    print(f"Found {len(all_m3u_files)} playlist files to process.")
 
-    # Process genres from m3u-radio-music-playlists
-    genre_path = "m3u-radio-music-playlists"
-    for filename in os.listdir(genre_path):
-        if filename.endswith(".m3u") and not filename.startswith("---"):
-            genre_name = os.path.splitext(filename)[0]
-            c.execute("INSERT OR IGNORE INTO genres (name) VALUES (?)", (genre_name,))
-            conn.commit()
-            c.execute("SELECT id FROM genres WHERE name = ?", (genre_name,))
+    for filepath in all_m3u_files:
+        filename = os.path.basename(filepath)
+        
+        if '---' in filename or 'checked' in filepath.replace(os.path.sep, '/') :
+            continue
+
+        name_part = os.path.splitext(filename)[0].lower()
+        
+        current_country_name = None
+        current_genre_name = None
+
+        # 1. Try to identify country from filename (e.g., 'france.m3u', 'de-berlin.m3u')
+        # Check if filename is a full country name (e.g., 'france.m3u')
+        if name_part in country_names_to_codes:
+            current_country_name = country_codes[country_names_to_codes[name_part]]
+        # Check if filename is a country code (e.g., 'fr.m3u')
+        elif name_part in country_codes:
+            current_country_name = country_codes[name_part]
+        # Check for hyphenated country code (e.g., 'de-berlin.m3u')
+        elif '-' in name_part:
+            code_part = name_part.split('-')[0]
+            if code_part in country_codes:
+                current_country_name = country_codes[code_part]
+        
+        # 2. Try to identify genre from filename (e.g., 'rock.m3u')
+        if name_part in VALID_GENRES:
+            current_genre_name = name_part.replace('_', ' ').title()
+
+        # If neither country nor genre could be identified, skip this file for now
+        if not current_country_name and not current_genre_name:
+            # print(f"Skipping file with no clear country or genre: {filepath}") # For debugging
+            continue
+
+        stations = parse_m3u(filepath)
+        if not stations:
+            continue
+
+        genre_id = None
+        if current_genre_name:
+            c.execute("INSERT OR IGNORE INTO genres (name) VALUES (?)", (current_genre_name,))
+            c.execute("SELECT id FROM genres WHERE name = ?", (current_genre_name,))
             genre_id_result = c.fetchone()
             if genre_id_result:
                 genre_id = genre_id_result[0]
-                stations = parse_m3u(os.path.join(genre_path, filename))
-                for station in stations:
-                    c.execute("INSERT OR IGNORE INTO stations (name, url) VALUES (?, ?)", (station["name"], station["url"]))
-                    conn.commit()
-                    c.execute("SELECT id FROM stations WHERE url = ?", (station["url"],))
-                    station_id_result = c.fetchone()
-                    if station_id_result:
-                        station_id = station_id_result[0]
-                        c.execute("INSERT OR IGNORE INTO station_genres (station_id, genre_id) VALUES (?, ?)", (station_id, genre_id))
-                        conn.commit()
 
-    # Process countries from m3u-radio-music-playlists/world-radio_map
-    country_path = "m3u-radio-music-playlists/world-radio_map"
-    for filename in os.listdir(country_path):
-        if filename.endswith(".m3u") and not filename.startswith("---"):
-            country_code = filename.split('-')[0]
-            country_name = country_codes.get(country_code.lower())
-            if country_name:
-                c.execute("INSERT OR IGNORE INTO countries (name) VALUES (?)", (country_name,))
-                conn.commit()
-                c.execute("SELECT id FROM countries WHERE name = ?", (country_name,))
-                country_id_result = c.fetchone()
-                if country_id_result:
-                    country_id = country_id_result[0]
-                    stations = parse_m3u(os.path.join(country_path, filename))
-                    for station in stations:
-                        c.execute("SELECT id FROM stations WHERE url = ?", (station["url"],))
-                        existing_station = c.fetchone()
-                        if existing_station:
-                            c.execute("UPDATE stations SET country_id = ? WHERE id = ?", (country_id, existing_station[0]))
-                        else:
-                            c.execute("INSERT OR IGNORE INTO stations (name, url, country_id) VALUES (?, ?, ?)", (station["name"], station["url"], country_id))
-                        conn.commit()
+        country_id = None
+        if current_country_name:
+            c.execute("INSERT OR IGNORE INTO countries (name) VALUES (?)", (current_country_name,))
+            c.execute("SELECT id FROM countries WHERE name = ?", (current_country_name,))
+            country_id_result = c.fetchone()
+            if country_id_result:
+                country_id = country_id_result[0]
 
-    # Special handling for italian.m3u
-    country_name = "Italy"
-    c.execute("INSERT OR IGNORE INTO countries (name) VALUES (?)", (country_name,))
-    conn.commit()
-    c.execute("SELECT id FROM countries WHERE name = ?", (country_name,))
-    country_id_result = c.fetchone()
-    if country_id_result:
-        country_id = country_id_result[0]
-        stations = parse_m3u(os.path.join("m3u-radio-music-playlists", "italian.m3u"))
         for station in stations:
+            c.execute("INSERT OR IGNORE INTO stations (name, url) VALUES (?, ?)", (station["name"], station["url"]))
+            
             c.execute("SELECT id FROM stations WHERE url = ?", (station["url"],))
-            existing_station = c.fetchone()
-            if existing_station:
-                c.execute("UPDATE stations SET country_id = ? WHERE id = ?", (country_id, existing_station[0]))
-            else:
-                c.execute("INSERT OR IGNORE INTO stations (name, url, country_id) VALUES (?, ?, ?)", (station["name"], station["url"], country_id))
-            conn.commit()
+            station_id_result = c.fetchone()
+            if not station_id_result:
+                continue
+            station_id = station_id_result[0]
 
-    # Now try to find logos for stations that don't have them
-    # This part is commented out because it is very slow and may cause the script to hang.
-    # c.execute("SELECT id, url FROM stations WHERE logo_url IS NULL")
-    # stations_without_logo = c.fetchall()
-    # for station_id, station_url in stations_without_logo:
-    #     # Try to find the source website for this station
-    #     # This is a very naive approach and will need to be improved
-    #     try:
-    #         parsed_url = urlparse(station_url)
-    #         base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-    #         c.execute("SELECT url FROM sources WHERE ? LIKE '%' || folder || '%'", (base_url,))
-    #         source_website = c.fetchone()
-    #         if source_website:
-    #             source_url = source_website[0]
-    #         else:
-    #             source_url = base_url # Fallback to base URL if no specific source found
+            if country_id:
+                c.execute("UPDATE stations SET country_id = ? WHERE id = ? AND country_id IS NULL", (country_id, station_id))
 
-    #         logo_url = find_logo_on_website(source_url)
-    #         if logo_url:
-    #             c.execute("UPDATE stations SET logo_url = ? WHERE id = ?", (logo_url, station_id))
-    #             conn.commit()
-    #     except Exception as e:
-    #         print(f"Error processing station {station_url} for logo: {e}")
-    #         continue
+            if genre_id:
+                c.execute("INSERT OR IGNORE INTO station_genres (station_id, genre_id) VALUES (?, ?)", (station_id, genre_id))
+        
+        conn.commit()
 
-def find_logo_on_website(website_url):
-    try:
-        response = requests.get(website_url, timeout=10)
-        soup = BeautifulSoup(response.content, 'lxml')
-        # Try to find logo in meta tags (e.g., Open Graph)
-        og_image = soup.find("meta", property="og:image")
-        if og_image and og_image.get("content"):
-            return og_image["content"]
-        # Try to find logo in link tags (e.g., favicon, apple-touch-icon)
-        icon_link = soup.find("link", rel=["icon", "apple-touch-icon"])
-        if icon_link and icon_link.get("href"):
-            return icon_link["href"]
-        # Try to find logo in img tags with common alt/src attributes
-        for img in soup.find_all("img"):
-            if "logo" in img.get("alt", "").lower() or "logo" in img.get("src", "").lower():
-                return img["src"]
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching website {website_url}: {e}")
-    except Exception as e:
-        print(f"Error parsing website {website_url}: {e}")
-    return None
+    print("\nDatabase population complete.")
 
 if __name__ == '__main__':
     db_conn = create_database()
